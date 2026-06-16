@@ -458,8 +458,8 @@ class CardsRotatedTaskAlignedAssigner(RotatedTaskAlignedAssigner):
             device=target_labels.device,
         )  # (b, h*w, 17)
 
-        suit_targets = target_labels[..., 0].long()
-        rank_targets = target_labels[..., 1].long()
+        suit_targets = target_labels[..., 0].long().clamp_(0, 3)
+        rank_targets = target_labels[..., 1].long().clamp_(0, 12)
 
         target_scores.scatter_(2, suit_targets.unsqueeze(-1), 1.0)
         target_scores.scatter_(2, (rank_targets + 4).unsqueeze(-1), 1.0)
