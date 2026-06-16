@@ -78,6 +78,44 @@ class OBBTrainer(yolo.detect.DetectionTrainer):
         )
 
 
+from ultralytics.models.yolo.obb.val import OBBValidator
+
+class CardsOBBValidator(OBBValidator):
+    """Custom validator to duplicate GT boxes for independent suit and rank mAP evaluation."""
+    def _prepare_batch(self, si: int, batch: dict):
+        """Prepare batch data for OBB validation by duplicating GT boxes for suit and rank."""
+        idx = batch["batch_idx"] == si
+        
+        # Original 2-column classes
+        cls = batch["cls"][idx].long()  # (n_boxes, 2)
+        bbox = batch["bboxes"][idx]
+        
+        # If there are boxes, duplicate them to evaluate Suit and Rank as separate items
+        if cls.shape[0] > 0 and cls.shape[1] == 2:
+            suit_cls = cls[:, 0]  # Suit ID (0-3)
+            rank_cls = cls[:, 1] + 4  # Rank ID (4-16)
+            
+            # Create a 1D tensor [suit1, rank1, suit2, rank2, ...]
+            new_cls = torch.stack([suit_cls, rank_cls], dim=1).flatten().float()
+            
+            # Duplicate the bboxes [box1, box1, box2, box2, ...]
+            new_bbox = bbox.repeat_interleave(2, dim=0)
+            
+            # Temporarily replace them in the batch dictionary
+            batch["cls_val_temp"] = new_cls
+            batch["bboxes_val_temp"] = new_bbox
+        else:
+            # Handle empty images or standard 1D classes
+            batch["cls_val_temp"] = cls.squeeze(-1).float()
+            batch["bboxes_val_temp"] = bbox
+
+        # Call super method but with our pre-prepared temp data
+        res = super()._prepare_batch(si, batch)
+        res["cls"] = batch.pop("cls_val_temp")
+        res["bboxes"] = batch.pop("bboxes_val_temp")
+        return res
+
+
 class CardsOBBTrainer(OBBTrainer):
     """
     A class extending the OBBTrainer class for training Playing Cards multi-label model.
@@ -148,5 +186,12 @@ class CardsOBBTrainer(OBBTrainer):
             # The last layer [-1] is the CardsOBB head
             for param in self.model.model[:-1].parameters():
                 param.requires_grad = False
+
+    def get_validator(self):
+        """Return an instance of CardsOBBValidator for validation of custom multi-label YOLO model."""
+        self.loss_names = "box_loss", "cls_loss", "dfl_loss", "angle_loss"
+        return CardsOBBValidator(
+            self.test_loader, save_dir=self.save_dir, args=copy(self.args), _callbacks=self.callbacks
+        )
 
 
