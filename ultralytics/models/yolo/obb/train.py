@@ -83,7 +83,17 @@ class CardsOBBTrainer(OBBTrainer):
     A class extending the OBBTrainer class for training Playing Cards multi-label model.
     """
 
+    def __init__(self, cfg=DEFAULT_CFG, overrides: dict | None = None, _callbacks: dict | None = None):
+        """Initialize CardsOBBTrainer and handle custom arguments."""
+        if overrides is None:
+            overrides = {}
+        # Pop custom arguments before passing to super to avoid validation errors
+        self.custom_weights = overrides.pop("weights", None)
+        self.freeze_backbone_flag = overrides.pop("freeze_backbone", False)
+        super().__init__(cfg, overrides, _callbacks)
+
     def build_dataset(self, img_path: str, mode: str = "train", batch: int | None = None):
+
         """Build CardsYOLODataset for training or validation."""
         from ultralytics.data import CardsYOLODataset
         from ultralytics.utils import colorstr
@@ -119,6 +129,7 @@ class CardsOBBTrainer(OBBTrainer):
 
         # nc is 17 for cards (4 suits + 13 ranks)
         model = OBBModel(cfg, nc=17, ch=self.data["channels"], verbose=verbose and RANK == -1)
+        weights = weights or self.custom_weights
         if weights:
             model.load(weights)
         return model
@@ -126,8 +137,8 @@ class CardsOBBTrainer(OBBTrainer):
     def set_model_attributes(self):
         """Set model attributes and freeze backbone if requested."""
         super().set_model_attributes()
-        # Check if freeze_backbone is in args (can be passed via overrides)
-        if getattr(self.args, "freeze_backbone", False):
+        # Check if freeze_backbone was passed during initialization
+        if self.freeze_backbone_flag:
             from ultralytics.utils import LOGGER
 
             LOGGER.info("Freezing backbone as requested (freeze_backbone=True)")
@@ -135,4 +146,5 @@ class CardsOBBTrainer(OBBTrainer):
             # The last layer [-1] is the CardsOBB head
             for param in self.model.model[:-1].parameters():
                 param.requires_grad = False
+
 
