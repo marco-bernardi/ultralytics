@@ -814,20 +814,40 @@ def plot_images(
                 is_obb = boxes.shape[-1] == 5  # xywhr
                 boxes = ops.xywhr2xyxyxyxy(boxes) if is_obb else ops.xywh2xyxy(boxes)
                 for j, box in enumerate(boxes.astype(np.int64).tolist()):
+                    # Handle multi-column classes for custom playing card dual-label model
                     c = classes[j]
-                    color = colors(c)
-                    c = names.get(c, c) if names else c
+                    if isinstance(c, (list, tuple, np.ndarray)) and len(np.shape(c)) > 0:
+                        if len(c) == 2: # Suit and Rank
+                            suit_c, rank_c = int(c[0]), int(c[1]) + 4 # Rank starts at 4
+                            color = colors(suit_c)
+                            suit_name = names.get(suit_c, suit_c) if names else suit_c
+                            rank_name = names.get(rank_c, rank_c) if names else rank_c
+                            c_name = f"{suit_name}_{rank_name}"
+                        else:
+                            c = int(c[0])
+                            color = colors(c)
+                            c_name = names.get(c, c) if names else c
+                    else:
+                        c = int(c)
+                        color = colors(c)
+                        c_name = names.get(c, c) if names else c
+                        
                     if labels or conf[j] > conf_thres:
                         conf_text = f"{conf[j]:.1f}" if conf is not None else ""
-                        label = f"{c}" if show_labels else ""
+                        label = f"{c_name}" if show_labels else ""
                         label += f" {conf_text}".strip() if show_conf else ""
                         annotator.box_label(box, label, color=color)
 
             elif len(classes):
                 for c in classes:
+                    # Handle multi-column classes
+                    if isinstance(c, (list, tuple, np.ndarray)) and len(np.shape(c)) > 0:
+                        c = int(c[0])
+                    else:
+                        c = int(c)
                     color = colors(c)
-                    c = names.get(c, c) if names else c
-                    label = f"{c}" if labels else f"{c} {conf[0]:.1f}"
+                    c_name = names.get(c, c) if names else c
+                    label = f"{c_name}" if labels else f"{c_name} {conf[0]:.1f}"
                     annotator.text([x, y], label, txt_color=color, box_color=(64, 64, 64, 128))
 
             # Plot keypoints
