@@ -79,6 +79,7 @@ class OBBTrainer(yolo.detect.DetectionTrainer):
 
 
 from ultralytics.models.yolo.obb.val import OBBValidator
+import torch
 
 class CardsOBBValidator(OBBValidator):
     """Custom validator to duplicate GT boxes for independent suit and rank mAP evaluation."""
