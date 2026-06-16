@@ -76,3 +76,63 @@ class OBBTrainer(yolo.detect.DetectionTrainer):
         return yolo.obb.OBBValidator(
             self.test_loader, save_dir=self.save_dir, args=copy(self.args), _callbacks=self.callbacks
         )
+
+
+class CardsOBBTrainer(OBBTrainer):
+    """
+    A class extending the OBBTrainer class for training Playing Cards multi-label model.
+    """
+
+    def build_dataset(self, img_path: str, mode: str = "train", batch: int | None = None):
+        """Build CardsYOLODataset for training or validation."""
+        from ultralytics.data import CardsYOLODataset
+        from ultralytics.utils import colorstr
+
+        # Use stride from model if available, otherwise default to 32
+        stride = 32
+        if hasattr(self, "model") and self.model is not None:
+            if hasattr(self.model, "stride"):
+                stride = int(self.model.stride.max())
+        gs = max(stride, 32)
+
+        return CardsYOLODataset(
+            img_path=img_path,
+            imgsz=self.args.imgsz,
+            batch_size=batch,
+            augment=mode == "train",
+            hyp=self.args,
+            rect=self.args.rect or (mode == "val"),
+            cache=self.args.cache or None,
+            single_cls=self.args.single_cls or False,
+            stride=gs,
+            pad=0.0 if mode == "train" else 0.5,
+            prefix=colorstr(f"{mode}: "),
+            task=self.args.task,
+            classes=self.args.classes,
+            data=self.data,
+            fraction=self.args.fraction if mode == "train" else 1.0,
+        )
+
+    def get_model(self, cfg=None, weights=None, verbose=True):
+        """Return OBBModel with CardsOBB head."""
+        from ultralytics.nn.tasks import OBBModel
+
+        # nc is 17 for cards (4 suits + 13 ranks)
+        model = OBBModel(cfg, nc=17, ch=self.data["channels"], verbose=verbose and RANK == -1)
+        if weights:
+            model.load(weights)
+        return model
+
+    def set_model_attributes(self):
+        """Set model attributes and freeze backbone if requested."""
+        super().set_model_attributes()
+        # Check if freeze_backbone is in args (can be passed via overrides)
+        if getattr(self.args, "freeze_backbone", False):
+            from ultralytics.utils import LOGGER
+
+            LOGGER.info("Freezing backbone as requested (freeze_backbone=True)")
+            # self.model.model is the Sequential containing all layers
+            # The last layer [-1] is the CardsOBB head
+            for param in self.model.model[:-1].parameters():
+                param.requires_grad = False
+

@@ -12,7 +12,14 @@ import torch.nn.functional as F
 
 from ultralytics.utils.metrics import CITYSCAPES_WEIGHT, OKS_SIGMA, RLE_WEIGHT
 from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh
-from ultralytics.utils.tal import RotatedTaskAlignedAssigner, TaskAlignedAssigner, dist2bbox, dist2rbox, make_anchors
+from ultralytics.utils.tal import (
+    CardsRotatedTaskAlignedAssigner,
+    RotatedTaskAlignedAssigner,
+    TaskAlignedAssigner,
+    dist2bbox,
+    dist2rbox,
+    make_anchors,
+)
 from ultralytics.utils.torch_utils import autocast
 
 from .metrics import bbox_iou, probiou
@@ -1072,6 +1079,179 @@ class v8OBBLoss(v8DetectionLoss):
         if self.class_weights is not None:
             bce_loss *= self.class_weights
         loss[1] = bce_loss.sum() / target_scores_sum
+
+        # Bbox loss
+        if fg_mask.sum():
+            target_bboxes[..., :4] /= stride_tensor
+            loss[0], loss[2] = self.bbox_loss(
+                pred_distri,
+                pred_bboxes,
+                anchor_points,
+                target_bboxes,
+                target_scores,
+                target_scores_sum,
+                fg_mask,
+                imgsz,
+                stride_tensor,
+            )
+            weight = target_scores.sum(-1)[fg_mask]
+            loss[3] = self.calculate_angle_loss(
+                pred_bboxes, target_bboxes, fg_mask, weight, target_scores_sum
+            )  # angle loss
+        else:
+            loss[0] += (pred_angle * 0).sum()
+
+        loss[0] *= self.hyp.box  # box gain
+        loss[1] *= self.hyp.cls  # cls gain
+        loss[2] *= self.hyp.dfl  # dfl gain
+        loss[3] *= self.hyp.angle  # angle gain
+
+        return loss * batch_size, loss.detach()  # loss(box, cls, dfl, angle)
+
+    def bbox_decode(
+        self, anchor_points: torch.Tensor, pred_dist: torch.Tensor, pred_angle: torch.Tensor
+    ) -> torch.Tensor:
+        """Decode predicted object bounding box coordinates from anchor points and distribution.
+
+        Args:
+            anchor_points (torch.Tensor): Anchor points, (h*w, 2).
+            pred_dist (torch.Tensor): Predicted rotated distance, (bs, h*w, 4).
+            pred_angle (torch.Tensor): Predicted angle, (bs, h*w, 1).
+
+        Returns:
+            (torch.Tensor): Predicted rotated bounding boxes with angles, (bs, h*w, 5).
+        """
+        if self.use_dfl:
+            b, a, c = pred_dist.shape  # batch, anchors, channels
+            pred_dist = pred_dist.view(b, a, 4, c // 4).softmax(3).matmul(self.proj.type(pred_dist.dtype))
+        return torch.cat((dist2rbox(pred_dist, pred_angle, anchor_points), pred_angle), dim=-1)
+
+    def calculate_angle_loss(self, pred_bboxes, target_bboxes, fg_mask, weight, target_scores_sum, lambda_val=3):
+        """Calculate oriented angle loss.
+
+        Args:
+            pred_bboxes (torch.Tensor): Predicted bounding boxes with shape [N, 5] (x, y, w, h, theta).
+            target_bboxes (torch.Tensor): Target bounding boxes with shape [N, 5] (x, y, w, h, theta).
+            fg_mask (torch.Tensor): Foreground mask indicating valid predictions.
+            weight (torch.Tensor): Loss weights for each prediction.
+            target_scores_sum (torch.Tensor): Sum of target scores for normalization.
+            lambda_val (int): Controls the sensitivity to aspect ratio.
+
+        Returns:
+            (torch.Tensor): The calculated angle loss.
+        """
+        w_gt = target_bboxes[..., 2]
+        h_gt = target_bboxes[..., 3]
+        pred_theta = pred_bboxes[..., 4]
+        target_theta = target_bboxes[..., 4]
+
+        log_ar = torch.log((w_gt + 1e-9) / (h_gt + 1e-9))
+        scale_weight = torch.exp(-(log_ar**2) / (lambda_val**2))
+
+        delta_theta = pred_theta - target_theta
+        delta_theta_wrapped = delta_theta - torch.round(delta_theta / math.pi) * math.pi
+        ang_loss = torch.sin(2 * delta_theta_wrapped[fg_mask]) ** 2
+
+        ang_loss = scale_weight[fg_mask] * ang_loss
+        ang_loss = ang_loss * weight
+
+        return ang_loss.sum() / target_scores_sum
+
+
+class CardsOBBLoss(v8OBBLoss):
+    """Calculates losses for playing cards multi-label (suit and rank) oriented bounding box detection."""
+
+    def __init__(self, model: torch.nn.Module, tal_topk=10, tal_topk2: int | None = None):
+        """Initialize CardsOBBLoss with model and CardsRotatedTaskAlignedAssigner."""
+        super().__init__(model, tal_topk=tal_topk, tal_topk2=tal_topk2)
+        from ultralytics.utils.tal import CardsRotatedTaskAlignedAssigner
+
+        self.assigner = CardsRotatedTaskAlignedAssigner(
+            topk=tal_topk,
+            num_classes=self.nc,
+            alpha=0.5,
+            beta=6.0,
+            stride=self.stride.tolist(),
+            topk2=tal_topk2,
+        )
+
+    def preprocess(self, targets: torch.Tensor, batch_size: int, scale_tensor: torch.Tensor) -> torch.Tensor:
+        """Preprocess targets for oriented bounding box detection with dual labels (suit, rank)."""
+        if targets.shape[0] == 0:
+            out = torch.zeros(batch_size, 0, 7, device=self.device)  # 2 labels + 5 bboxes
+        else:
+            batch_idx = targets[:, 0].long()  # image index
+            _, counts = batch_idx.unique(return_counts=True)
+            counts = counts.to(dtype=torch.int32)
+            out = torch.zeros(batch_size, counts.max(), 7, device=self.device)  # 2 labels + 5 bboxes
+            packed_targets = targets[:, 1:].clone()
+            packed_targets[:, 2:6].mul_(scale_tensor)  # Indices shifted by 1 because of 2 labels
+            offsets = torch.zeros(batch_size + 1, dtype=torch.long, device=self.device)
+            offsets.scatter_add_(0, batch_idx + 1, torch.ones_like(batch_idx))
+            offsets = offsets.cumsum(0)
+            within_idx = torch.arange(len(targets), device=self.device) - offsets[batch_idx]
+            out[batch_idx, within_idx] = packed_targets
+        return out
+
+    def loss(self, preds: dict[str, torch.Tensor], batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+        """Calculate and return the loss for playing cards oriented bounding box detection."""
+        loss = torch.zeros(4, device=self.device)  # box, cls, dfl, angle
+        pred_distri, pred_scores, pred_angle = (
+            preds["boxes"].permute(0, 2, 1).contiguous(),
+            preds["scores"].permute(0, 2, 1).contiguous(),
+            preds["angle"].permute(0, 2, 1).contiguous(),
+        )
+        anchor_points, stride_tensor = make_anchors(preds["feats"], self.stride, 0.5)
+        batch_size = pred_angle.shape[0]  # batch size
+
+        dtype = pred_scores.dtype
+        imgsz = torch.tensor(preds["feats"][0].shape[2:], device=self.device, dtype=dtype) * self.stride[0]
+
+        # targets
+        try:
+            batch_idx = batch["batch_idx"].view(-1, 1)
+            # batch["cls"] is (N, 2), batch["bboxes"] is (N, 5)
+            targets = torch.cat((batch_idx, batch["cls"], batch["bboxes"].view(-1, 5)), 1)
+            rw, rh = targets[:, 5] * float(imgsz[1]), targets[:, 6] * float(imgsz[0])
+            targets = targets[(rw >= 2) & (rh >= 2)]  # filter rboxes of tiny size to stabilize training
+            targets = self.preprocess(targets.to(self.device), batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])
+            gt_labels, gt_bboxes = targets.split((2, 5), 2)  # cls (2), xywhr (5)
+            mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0.0)
+        except RuntimeError as e:
+            raise TypeError(
+                "ERROR ❌ OBB dataset incorrectly formatted or not a Cards OBB dataset.\n"
+                "Verify your dataset is a correctly formatted 'OBB' dataset with 2 classification columns."
+            ) from e
+
+        # Pboxes
+        pred_bboxes = self.bbox_decode(anchor_points, pred_distri, pred_angle)  # xywhr, (b, h*w, 5)
+
+        bboxes_for_assigner = pred_bboxes.clone().detach()
+        # Only the first four elements need to be scaled
+        bboxes_for_assigner[..., :4] *= stride_tensor
+        _, target_bboxes, target_scores, fg_mask, _ = self.assigner(
+            pred_scores.detach().sigmoid(),
+            bboxes_for_assigner.type(gt_bboxes.dtype),
+            anchor_points * stride_tensor,
+            gt_labels,
+            gt_bboxes,
+            mask_gt,
+        )
+
+        target_scores_sum = max(target_scores.sum(), 1)
+
+        # Cls loss: Split 17 channels into 4 (suit) and 13 (rank)
+        # Apply Softmax + CrossEntropy to both
+        suit_preds = pred_scores[..., 0:4]
+        rank_preds = pred_scores[..., 4:17]
+        suit_targets = target_scores[..., 0:4]
+        rank_targets = target_scores[..., 4:17]
+
+        # F.cross_entropy with soft targets (probabilities)
+        loss_suit = F.cross_entropy(suit_preds.view(-1, 4), suit_targets.view(-1, 4), reduction="sum")
+        loss_rank = F.cross_entropy(rank_preds.view(-1, 13), rank_targets.view(-1, 13), reduction="sum")
+
+        loss[1] = (loss_suit + loss_rank) / target_scores_sum
 
         # Bbox loss
         if fg_mask.sum():

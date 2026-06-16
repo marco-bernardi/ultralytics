@@ -22,6 +22,8 @@ from .utils import bias_init_with_prob, linear_init
 
 __all__ = (
     "OBB",
+    "OBB26",
+    "CardsOBB",
     "Classify",
     "Detect",
     "Pose",
@@ -553,6 +555,25 @@ class OBB26(OBB):
             )  # OBB theta logits (raw output without sigmoid transformation)
             preds["angle"] = angle
         return preds
+
+
+class CardsOBB(OBB26):
+    """YOLO OBB head for Multi-Label Playing Cards (Suit + Rank)."""
+
+    def __init__(self, nc=17, ne=1, reg_max=16, end2end=False, ch=()):
+        """
+        Initialize CardsOBB.
+
+        Args:
+            nc (int): Number of classes. Defaults to 17 (4 suit + 13 rank).
+            ne (int): Number of extra parameters.
+            reg_max (int): Maximum number of DFL channels.
+            end2end (bool): Whether to use end-to-end NMS-free detection.
+            ch (tuple): Tuple of channel sizes from backbone feature maps.
+        """
+        super().__init__(nc=nc, ne=ne, reg_max=reg_max, end2end=end2end, ch=ch)
+        self.nc_suit = 4
+        self.nc_rank = 13
 
 
 class Pose(Detect):

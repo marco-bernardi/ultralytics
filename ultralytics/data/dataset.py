@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections import defaultdict
 from itertools import repeat
 from multiprocessing.pool import ThreadPool
@@ -17,7 +18,7 @@ from torch.utils.data import ConcatDataset
 
 from ultralytics.utils import LOCAL_RANK, LOGGER, NUM_THREADS, TQDM, colorstr
 from ultralytics.utils.instance import Instances
-from ultralytics.utils.ops import resample_segments, segments2boxes
+from ultralytics.utils.ops import resample_segments, segments2boxes, xywhr2xyxyxyxy
 from ultralytics.utils.torch_utils import TORCHVISION_0_18
 
 from .augment import (
@@ -35,6 +36,7 @@ from .converter import merge_multi_segment
 from .utils import (
     HELP_URL,
     check_file_speeds,
+    check_image,
     get_hash,
     img2label_paths,
     load_dataset_cache_file,
@@ -1110,3 +1112,116 @@ class ClassificationDataset:
             x["msgs"] = msgs  # warnings
             save_dataset_cache_file(self.prefix, path, x, DATASET_CACHE_VERSION)
             return samples
+
+
+def verify_image_label_cards(args):
+    """Verify one image-label pair for Cards dataset (dual label)."""
+    im_file, lb_file, prefix, keypoint, num_cls, nkpt, ndim, single_cls = args
+    # Number (missing, found, empty, corrupt), message, segments, keypoints
+    nm, nf, ne, nc, msg, segments, keypoints = 0, 0, 0, 0, "", [], None
+    try:
+        # Verify images
+        msg, shape = check_image(im_file)
+        msg = f"{prefix}{msg}" if msg else ""
+
+        # Verify labels
+        if os.path.isfile(lb_file):
+            nf = 1  # label found
+            with open(lb_file, encoding="utf-8") as f:
+                # Format: suit_id rank_id x y w h angle
+                lb = [x.split() for x in f.read().strip().splitlines() if len(x)]
+                lb = np.array(lb, dtype=np.float32)
+            if nl := len(lb):
+                if lb.shape[1] != 7:
+                    raise ValueError(f"labels require 7 columns, {lb.shape[1]} columns detected")
+
+                # Check for OBB (oriented bounding boxes)
+                # Convert [x, y, w, h, angle] to segments (4 points)
+                # suit=lb[:, 0], rank=lb[:, 1], obb=lb[:, 2:]
+                obb = lb[:, 2:]  # (nl, 5)
+                segments = xywhr2xyxyxyxy(obb)  # (nl, 4, 2)
+
+                points = lb[:, 2:6]  # x y w h
+                # Coordinate points check with 1% tolerance
+                assert points.max() <= 1.01, f"non-normalized or out of bounds coordinates {points[points > 1.01]}"
+                assert lb.min() >= -0.01, f"negative labels or coordinate {lb[lb < -0.01]}"
+
+                # Duplicate row check
+                _, i = np.unique(lb, axis=0, return_index=True)
+                if len(i) < nl:
+                    lb = lb[i]
+                    segments = segments[i]
+                    msg = f"{prefix}{im_file}: {nl - len(i)} duplicate labels removed"
+            else:
+                ne = 1  # label empty
+                lb = np.zeros((0, 7), dtype=np.float32)
+        else:
+            nm = 1  # label missing
+            lb = np.zeros((0, 7), dtype=np.float32)
+
+        return im_file, lb, shape, segments, keypoints, nm, nf, ne, nc, msg
+    except Exception as e:
+        nc = 1
+        msg = f"{prefix}{im_file}: ignoring corrupt image/label: {e}"
+        return [None, None, None, None, None, nm, nf, ne, nc, msg]
+
+
+class CardsYOLODataset(YOLODataset):
+    """Dataset class for loading object detection labels for Playing Cards with dual labels (Suit, Rank)."""
+
+    def cache_labels(self, path: Path = Path("./labels.cache")) -> dict:
+        """Cache dataset labels, check images and read shapes for Cards (dual label)."""
+        x = {"labels": []}
+        nm, nf, ne, nc, msgs = 0, 0, 0, 0, []  # number missing, found, empty, corrupt, messages
+        desc = f"{self.prefix}Scanning {path.parent / path.stem}..."
+        total = len(self.im_files)
+
+        with ThreadPool(NUM_THREADS) as pool:
+            results = pool.imap(
+                func=verify_image_label_cards,
+                iterable=zip(
+                    self.im_files,
+                    self.label_files,
+                    repeat(self.prefix),
+                    repeat(False),  # use_keypoints
+                    repeat(len(self.data["names"])),
+                    repeat(0),  # nkpt
+                    repeat(0),  # ndim
+                    repeat(self.single_cls),
+                ),
+            )
+            pbar = TQDM(results, desc=desc, total=total)
+            for im_file, lb, shape, segments, keypoint, nm_f, nf_f, ne_f, nc_f, msg in pbar:
+                nm += nm_f
+                nf += nf_f
+                ne += ne_f
+                nc += nc_f
+                if im_file:
+                    x["labels"].append(
+                        {
+                            "im_file": im_file,
+                            "shape": shape,
+                            "cls": lb[:, 0:2],  # n, 2 (suit, rank)
+                            "bboxes": lb[:, 2:6],  # n, 4 (x, y, w, h)
+                            "segments": segments,
+                            "keypoints": keypoint,
+                            "normalized": True,
+                            "bbox_format": "xywh",
+                        }
+                    )
+                if msg:
+                    msgs.append(msg)
+                pbar.desc = f"{desc} {nf} images, {nm + ne} backgrounds, {nc} corrupt"
+            pbar.close()
+
+        if msgs:
+            LOGGER.info("\n".join(msgs))
+        if nf == 0:
+            LOGGER.warning(f"{self.prefix}No labels found in {path}. {HELP_URL}")
+        x["hash"] = get_hash(self.label_files + self.im_files)
+        x["results"] = nf, nm, ne, nc, len(self.im_files)
+        x["msgs"] = msgs  # warnings
+        if x["labels"]:
+            save_dataset_cache_file(self.prefix, path, x, DATASET_CACHE_VERSION)
+        return x
+

@@ -398,6 +398,68 @@ class RotatedTaskAlignedAssigner(TaskAlignedAssigner):
         return (ap_dot_ab >= 0) & (ap_dot_ab <= norm_ab) & (ap_dot_ad >= 0) & (ap_dot_ad <= norm_ad)  # is_in_box
 
 
+class CardsRotatedTaskAlignedAssigner(RotatedTaskAlignedAssigner):
+    """
+    Assigns ground-truth objects to rotated bounding boxes for playing cards.
+    Handles dual classification: suit (4 classes) and rank (13 classes).
+    """
+
+    def get_box_metrics(self, pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_gt):
+        """Compute alignment metric using joint probability P(suit) * P(rank)."""
+        na = pd_bboxes.shape[-2]
+        mask_gt = mask_gt.bool()  # b, max_num_obj, h*w
+        overlaps = torch.zeros([self.bs, self.n_max_boxes, na], dtype=pd_bboxes.dtype, device=pd_bboxes.device)
+        bbox_scores = torch.zeros([self.bs, self.n_max_boxes, na], dtype=pd_scores.dtype, device=pd_scores.device)
+
+        ind0 = torch.arange(end=self.bs, device=pd_scores.device).view(-1, 1).expand(-1, self.n_max_boxes)  # b, max_num_obj
+        suit_labels = gt_labels[..., 0].long()  # b, max_num_obj
+        rank_labels = gt_labels[..., 1].long()  # b, max_num_obj
+
+        # pd_scores has 17 channels. 0-3 suit, 4-16 rank.
+        # Calculate joint probability: P(suit) * P(rank)
+        suit_bbox_scores = pd_scores[ind0, :, suit_labels]  # (bs, n_max_boxes, na)
+        rank_bbox_scores = pd_scores[ind0, :, rank_labels + 4]  # (bs, n_max_boxes, na)
+        bbox_scores[mask_gt] = (suit_bbox_scores * rank_bbox_scores)[mask_gt]
+
+        # (b, max_num_obj, 1, 5), (b, 1, h*w, 5)
+        pd_boxes = pd_bboxes.unsqueeze(1).expand(-1, self.n_max_boxes, -1, -1)[mask_gt]
+        gt_boxes = gt_bboxes.unsqueeze(2).expand(-1, -1, na, -1)[mask_gt]
+        overlaps[mask_gt] = self.iou_calculation(gt_boxes, pd_boxes)
+
+        align_metric = bbox_scores.pow(self.alpha) * overlaps.pow(self.beta)
+        return align_metric, overlaps
+
+    def get_targets(self, gt_labels, gt_bboxes, target_gt_idx, fg_mask):
+        """Compute target labels (2 columns), boxes, and scores (17 channels)."""
+        # Assigned target labels, (b, 1)
+        batch_ind = torch.arange(end=self.bs, dtype=torch.int64, device=gt_labels.device)[..., None]
+        target_gt_idx = target_gt_idx + batch_ind * self.n_max_boxes  # (b, h*w)
+
+        # target_labels should be (b, h*w, 2)
+        target_labels = gt_labels.view(-1, 2)[target_gt_idx]  # (b, h*w, 2)
+
+        # Assigned target boxes, (b, max_num_obj, 5) -> (b, h*w, 5)
+        target_bboxes = gt_bboxes.view(-1, gt_bboxes.shape[-1])[target_gt_idx]
+
+        # Assigned target scores (17 channels)
+        target_scores = torch.zeros(
+            (target_labels.shape[0], target_labels.shape[1], self.num_classes),
+            dtype=torch.float32,
+            device=target_labels.device,
+        )  # (b, h*w, 17)
+
+        suit_targets = target_labels[..., 0].long()
+        rank_targets = target_labels[..., 1].long()
+
+        target_scores.scatter_(2, suit_targets.unsqueeze(-1), 1.0)
+        target_scores.scatter_(2, (rank_targets + 4).unsqueeze(-1), 1.0)
+
+        fg_scores_mask = fg_mask[:, :, None].repeat(1, 1, self.num_classes)
+        target_scores = torch.where(fg_scores_mask > 0, target_scores, 0.0)
+
+        return target_labels, target_bboxes, target_scores
+
+
 def make_anchors(feats, strides, grid_cell_offset=0.5):
     """Generate anchors from features."""
     anchor_points, stride_tensor = [], []

@@ -18,6 +18,7 @@ from ultralytics.nn.modules import (
     C2PSA,
     C3,
     C3TR,
+    CardsOBB,
     ELAN1,
     OBB,
     OBB26,
@@ -549,7 +550,11 @@ class OBBModel(DetectionModel):
 
     def init_criterion(self):
         """Initialize the loss criterion for the model."""
-        return E2ELoss(self, v8OBBLoss) if getattr(self, "end2end", False) else v8OBBLoss(self)
+        from ultralytics.nn.modules.head import CardsOBB
+        from ultralytics.utils.loss import CardsOBBLoss, v8OBBLoss
+
+        loss_fn = CardsOBBLoss if isinstance(self.model[-1], CardsOBB) else v8OBBLoss
+        return E2ELoss(self, loss_fn) if getattr(self, "end2end", False) else loss_fn(self)
 
 
 class SegmentationModel(DetectionModel):
@@ -1904,12 +1909,13 @@ def parse_model(d, ch, verbose=True):
                 Pose26,
                 OBB,
                 OBB26,
+                CardsOBB,
             }
         ):
             args.extend([reg_max, end2end, [ch[x] for x in f]])
             if m is Segment or m is YOLOESegment or m is Segment26 or m is YOLOESegment26:
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)
-            if m in {Detect, YOLOEDetect, Segment, Segment26, YOLOESegment, YOLOESegment26, Pose, Pose26, OBB, OBB26}:
+            if m in {Detect, YOLOEDetect, Segment, Segment26, YOLOESegment, YOLOESegment26, Pose, Pose26, OBB, OBB26, CardsOBB}:
                 m.legacy = legacy
         elif m is SemanticSegment:
             args.append([ch[x] for x in f])  # nc, ch tuple
