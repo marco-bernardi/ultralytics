@@ -2331,7 +2331,11 @@ class Format(BaseTransform):
                 sem_masks = torch.zeros(h // self.mask_ratio, w // self.mask_ratio)
             labels["masks"] = masks
             labels["sem_masks"] = sem_masks.float()
-        labels["cls"] = torch.from_numpy(cls) if nl else torch.zeros(nl, 1)
+        
+        # Preserve cls shape if it's already a 2D array (like (0, 2) for multi-label)
+        cls_shape_1 = cls.shape[1] if isinstance(cls, np.ndarray) and cls.ndim > 1 else 1
+        labels["cls"] = torch.from_numpy(cls) if nl else torch.zeros((nl, cls_shape_1), dtype=torch.float32)
+        
         labels["bboxes"] = torch.from_numpy(instances.bboxes) if nl else torch.zeros((nl, 4))
         if self.return_keypoint:
             labels["keypoints"] = (
