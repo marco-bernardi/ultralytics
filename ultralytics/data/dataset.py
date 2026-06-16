@@ -1132,16 +1132,18 @@ def verify_image_label_cards(args):
                 lb = [x.split() for x in f.read().strip().splitlines() if len(x)]
                 lb = np.array(lb, dtype=np.float32)
             if nl := len(lb):
-                if lb.shape[1] != 7:
-                    raise ValueError(f"labels require 7 columns, {lb.shape[1]} columns detected")
+                if lb.shape[1] != 10:
+                    raise ValueError(f"labels require 10 columns (suit rank x1 y1 x2 y2 x3 y3 x4 y4), {lb.shape[1]} columns detected")
 
-                # Check for OBB (oriented bounding boxes)
-                # Convert [x, y, w, h, angle] to segments (4 points)
-                # suit=lb[:, 0], rank=lb[:, 1], obb=lb[:, 2:]
-                obb = lb[:, 2:]  # (nl, 5)
-                segments = xywhr2xyxyxyxy(obb)  # (nl, 4, 2)
+                # Parse segments (8 coordinates -> 4 points of 2 coords)
+                segments = lb[:, 2:].reshape(-1, 4, 2)  # (nl, 4, 2)
+                
+                # Get xywh bounding box from segments for standard compatibility
+                bboxes = segments2boxes(segments)  # returns xyxy
+                from ultralytics.utils.ops import xyxy2xywh
+                bboxes = xyxy2xywh(bboxes)  # returns xywh
 
-                points = lb[:, 2:6]  # x y w h
+                points = lb[:, 2:]  # all 8 coordinates
                 # Coordinate points check with 1% tolerance
                 assert points.max() <= 1.01, f"non-normalized or out of bounds coordinates {points[points > 1.01]}"
                 assert lb.min() >= -0.01, f"negative labels or coordinate {lb[lb < -0.01]}"
@@ -1151,19 +1153,24 @@ def verify_image_label_cards(args):
                 if len(i) < nl:
                     lb = lb[i]
                     segments = segments[i]
+                    bboxes = bboxes[i]
                     msg = f"{prefix}{im_file}: {nl - len(i)} duplicate labels removed"
             else:
                 ne = 1  # label empty
-                lb = np.zeros((0, 7), dtype=np.float32)
+                lb = np.zeros((0, 10), dtype=np.float32)
+                segments = np.zeros((0, 4, 2), dtype=np.float32)
+                bboxes = np.zeros((0, 4), dtype=np.float32)
         else:
             nm = 1  # label missing
-            lb = np.zeros((0, 7), dtype=np.float32)
+            lb = np.zeros((0, 10), dtype=np.float32)
+            segments = np.zeros((0, 4, 2), dtype=np.float32)
+            bboxes = np.zeros((0, 4), dtype=np.float32)
 
-        return im_file, lb, shape, segments, keypoints, nm, nf, ne, nc, msg
+        return im_file, lb, shape, segments, bboxes, keypoints, nm, nf, ne, nc, msg
     except Exception as e:
         nc = 1
         msg = f"{prefix}{im_file}: ignoring corrupt image/label: {e}"
-        return [None, None, None, None, None, nm, nf, ne, nc, msg]
+        return [None, None, None, None, None, None, nm, nf, ne, nc, msg]
 
 
 class CardsYOLODataset(YOLODataset):
@@ -1191,7 +1198,7 @@ class CardsYOLODataset(YOLODataset):
                 ),
             )
             pbar = TQDM(results, desc=desc, total=total)
-            for im_file, lb, shape, segments, keypoint, nm_f, nf_f, ne_f, nc_f, msg in pbar:
+            for im_file, lb, shape, segments, bboxes, keypoint, nm_f, nf_f, ne_f, nc_f, msg in pbar:
                 nm += nm_f
                 nf += nf_f
                 ne += ne_f
@@ -1202,13 +1209,14 @@ class CardsYOLODataset(YOLODataset):
                             "im_file": im_file,
                             "shape": shape,
                             "cls": lb[:, 0:2],  # n, 2 (suit, rank)
-                            "bboxes": lb[:, 2:6],  # n, 4 (x, y, w, h)
+                            "bboxes": bboxes,  # n, 4 (x, y, w, h) computed from segments
                             "segments": segments,
                             "keypoints": keypoint,
                             "normalized": True,
                             "bbox_format": "xywh",
                         }
                     )
+
                 if msg:
                     msgs.append(msg)
                 pbar.desc = f"{desc} {nf} images, {nm + ne} backgrounds, {nc} corrupt"
