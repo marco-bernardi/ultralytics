@@ -85,35 +85,31 @@ class CardsOBBValidator(OBBValidator):
     """Custom validator to duplicate GT boxes for independent suit and rank mAP evaluation."""
     def _prepare_batch(self, si: int, batch: dict):
         """Prepare batch data for OBB validation by duplicating GT boxes for suit and rank."""
+        # First call super to handle standard formatting and SCALING of bboxes!
+        res = super()._prepare_batch(si, batch)
+        
+        # Check original 2-column classes directly from the batch using the si index
         idx = batch["batch_idx"] == si
+        cls_original = batch["cls"][idx].long()  # (n_boxes, 2)
         
-        # Original 2-column classes
-        cls = batch["cls"][idx].long()  # (n_boxes, 2)
-        bbox = batch["bboxes"][idx]
-        
-        # If there are boxes, duplicate them to evaluate Suit and Rank as separate items
-        if cls.shape[0] > 0 and cls.shape[1] == 2:
-            suit_cls = cls[:, 0]  # Suit ID (0-3)
-            rank_cls = cls[:, 1] + 4  # Rank ID (4-16)
+        # If there are boxes and they are in the 2-column format
+        if cls_original.shape[0] > 0 and cls_original.shape[1] == 2:
+            suit_cls = cls_original[:, 0]  # Suit ID (0-3)
+            rank_cls = cls_original[:, 1] + 4  # Rank ID (4-16)
             
             # Create a 1D tensor [suit1, rank1, suit2, rank2, ...]
             new_cls = torch.stack([suit_cls, rank_cls], dim=1).flatten().float()
             
-            # Duplicate the bboxes [box1, box1, box2, box2, ...]
-            new_bbox = bbox.repeat_interleave(2, dim=0)
+            # Duplicate the ALREADY SCALED bboxes from res
+            new_bbox = res["bboxes"].repeat_interleave(2, dim=0)
             
-            # Temporarily replace them in the batch dictionary
-            batch["cls_val_temp"] = new_cls
-            batch["bboxes_val_temp"] = new_bbox
+            # Replace in result
+            res["cls"] = new_cls
+            res["bboxes"] = new_bbox
         else:
-            # Handle empty images or standard 1D classes
-            batch["cls_val_temp"] = cls.squeeze(-1).float()
-            batch["bboxes_val_temp"] = bbox
-
-        # Call super method but with our pre-prepared temp data
-        res = super()._prepare_batch(si, batch)
-        res["cls"] = batch.pop("cls_val_temp")
-        res["bboxes"] = batch.pop("bboxes_val_temp")
+            # If standard 1D classes (e.g. empty image), res["cls"] is already correctly squeezed by super()
+            res["cls"] = cls_original.squeeze(-1).float()
+            
         return res
 
 
