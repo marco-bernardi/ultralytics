@@ -415,10 +415,20 @@ class CardsRotatedTaskAlignedAssigner(RotatedTaskAlignedAssigner):
         suit_labels = gt_labels[..., 0].long()  # b, max_num_obj
         rank_labels = gt_labels[..., 1].long()  # b, max_num_obj
 
+        # Safe clamping for background boxes to prevent CUDA out-of-bounds error
+        suit_labels_safe = suit_labels.clamp(0, 3)
+        rank_labels_safe = rank_labels.clamp(0, 12) + 4
+
         # pd_scores has 17 channels. 0-3 suit, 4-16 rank.
         # Calculate joint probability: P(suit) * P(rank)
-        suit_bbox_scores = pd_scores[ind0, :, suit_labels]  # (bs, n_max_boxes, na)
-        rank_bbox_scores = pd_scores[ind0, :, rank_labels + 4]  # (bs, n_max_boxes, na)
+        # We need to extract the scores for each anchor. pd_scores shape: (bs, na, 17)
+        # To align with (bs, max_num_obj, na), we expand pd_scores to (bs, max_num_obj, na, 17)
+        pd_scores_expanded = pd_scores.unsqueeze(1).expand(-1, self.n_max_boxes, -1, -1)
+        
+        # Now gather the suit and rank scores for each ground truth object
+        suit_bbox_scores = pd_scores_expanded.gather(-1, suit_labels_safe.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, na, 1)).squeeze(-1)
+        rank_bbox_scores = pd_scores_expanded.gather(-1, rank_labels_safe.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, na, 1)).squeeze(-1)
+        
         bbox_scores[mask_gt] = (suit_bbox_scores * rank_bbox_scores)[mask_gt]
 
         # (b, max_num_obj, 1, 5), (b, 1, h*w, 5)
