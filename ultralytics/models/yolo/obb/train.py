@@ -125,12 +125,14 @@ class CardsOBBTrainer(OBBTrainer):
 
     def get_model(self, cfg=None, weights=None, verbose=True):
         """Return OBBModel with CardsOBB head."""
-        from ultralytics.nn.tasks import OBBModel
+        from ultralytics.nn.tasks import OBBModel, load_checkpoint
 
         # nc is 17 for cards (4 suits + 13 ranks)
         model = OBBModel(cfg, nc=17, ch=self.data["channels"], verbose=verbose and RANK == -1)
         weights = weights or self.custom_weights
         if weights:
+            if isinstance(weights, (str, Path)):
+                weights, _ = load_checkpoint(weights)
             model.load(weights)
         return model
 
