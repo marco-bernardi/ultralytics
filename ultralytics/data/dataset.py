@@ -1176,6 +1176,27 @@ def verify_image_label_cards(args):
 class CardsYOLODataset(YOLODataset):
     """Dataset class for loading object detection labels for Playing Cards with dual labels (Suit, Rank)."""
 
+    def update_labels_info(self, label: dict) -> dict:
+        """Update label format for Cards dataset. Bypasses resampling for OBB polygons."""
+        # For OBB, we don't want to resample the 4-point polygons into 100 points
+        if getattr(self, "use_obb", False):
+            bboxes = label.pop("bboxes")
+            segments = label.pop("segments", [])
+            keypoints = label.pop("keypoints", None)
+            bbox_format = label.pop("bbox_format")
+            normalized = label.pop("normalized")
+            
+            if len(segments) == 0:
+                segments = np.zeros((0, 4, 2), dtype=np.float32)
+            else:
+                # Ensure it's a numpy array of shape (N, 4, 2)
+                segments = np.array(segments, dtype=np.float32)
+                
+            label["instances"] = Instances(bboxes, segments, keypoints, bbox_format=bbox_format, normalized=normalized)
+            return label
+            
+        return super().update_labels_info(label)
+
     def cache_labels(self, path: Path = Path("./labels.cache")) -> dict:
         """Cache dataset labels, check images and read shapes for Cards (dual label)."""
         x = {"labels": []}
