@@ -1240,27 +1240,16 @@ class CardsOBBLoss(v8OBBLoss):
 
         target_scores_sum = max(target_scores.sum(), 1)
 
-        # Cls loss: CE on suit/rank groups for positives (mutual exclusion)
-        # + BCE on all 17 channels for negatives (background suppression)
-        suit_preds = pred_scores[..., 0:4]
-        rank_preds = pred_scores[..., 4:17]
-        suit_targets = target_scores[..., 0:4]
-        rank_targets = target_scores[..., 4:17]
-
-        fg = fg_mask.view(-1)
-        bg = ~fg
-
-        # CE on positives only -> mutual exclusion within suit and rank groups
-        loss_suit = F.cross_entropy(suit_preds.view(-1, 4)[fg], suit_targets.view(-1, 4)[fg], reduction="sum")
-        loss_rank = F.cross_entropy(rank_preds.view(-1, 13)[fg], rank_targets.view(-1, 13)[fg], reduction="sum")
-
-        # BCE on negatives only -> suppress background confidence on all 17 channels
-        bg_loss = self.bce(
-            pred_scores.view(-1, self.nc)[bg],
-            torch.zeros_like(pred_scores.view(-1, self.nc)[bg]),
-        ).sum()
-
-        loss[1] = (loss_suit + loss_rank + bg_loss) / target_scores_sum
+        # Cls loss: BCE on all 17 channels (same as v8OBBLoss).
+        # target_scores holds 1.0 on the suit channel AND the rank channel for positives,
+        # 0 elsewhere -> BCE pulls target channels up and suppresses background. This is the
+        # proven-stable formulation: the positive target-channel up-pull balances the negative
+        # down-pull, preventing the cls head from collapsing (which happens with negative-only
+        # suppression terms that overwhelm the few positives).
+        bce_loss = self.bce(pred_scores, target_scores.to(dtype))  # (bs, num_anchors, 17)
+        if self.class_weights is not None:
+            bce_loss *= self.class_weights
+        loss[1] = bce_loss.sum() / target_scores_sum
 
         # Bbox loss
         if fg_mask.sum():
