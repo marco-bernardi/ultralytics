@@ -1,7 +1,14 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
-from .predict import OBBPredictor
-from .train import OBBTrainer
+from .predict import CardsOBBPredictor, OBBPredictor
+from .train import CardsOBBTrainer, CardsOBBValidator, OBBTrainer
 from .val import OBBValidator
 
-__all__ = "OBBPredictor", "OBBTrainer", "OBBValidator"
+__all__ = (
+    "CardsOBBPredictor",
+    "OBBPredictor",
+    "CardsOBBTrainer",
+    "CardsOBBValidator",
+    "OBBTrainer",
+    "OBBValidator",
+)

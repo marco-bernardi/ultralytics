@@ -2,6 +2,6 @@
 
 from ultralytics.models.yolo import classify, detect, obb, pose, segment, semantic, world, yoloe
 
-from .model import YOLO, YOLOE, YOLOWorld
+from .model import YOLO, YOLOE, YOLOWorld, CardsYOLO
 
-__all__ = "YOLO", "YOLOE", "YOLOWorld", "classify", "detect", "obb", "pose", "segment", "semantic", "world", "yoloe"
+__all__ = "YOLO", "YOLOE", "YOLOWorld", "CardsYOLO", "classify", "detect", "obb", "pose", "segment", "semantic", "world", "yoloe"

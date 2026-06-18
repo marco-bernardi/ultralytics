@@ -126,6 +126,97 @@ class YOLO(Model):
         }
 
 
+class CardsYOLO(YOLO):
+    """YOLO variant for the multi-label Playing Cards OBB head (CardsOBB).
+
+    This subclass auto-selects `CardsOBBPredictor` at predict time when the loaded model uses the `CardsOBB` head (4
+    suits + 13 ranks per box), so that the dual-label post-processing (joint confidence, duplicated suit/rank
+    detections, per-class rotated NMS) is applied transparently. For standard OBB models it falls back to the default
+    `OBBPredictor`, so it can also be used as a drop-in replacement for `YOLO` on regular OBB checkpoints.
+
+    Training and validation use `CardsOBBTrainer` and `CardsOBBValidator` automatically when the head is `CardsOBB`,
+    via the overridden `task_map` for the "obb" task.
+
+    Examples:
+        >>> from ultralytics import CardsYOLO
+        >>> model = CardsYOLO("best.pt")  # cards multi-label checkpoint
+        >>> results = model.predict("image.jpg", conf=0.25)
+    """
+
+    def predict(self, source=None, stream: bool = False, predictor=None, **kwargs):
+        """Run prediction, auto-selecting CardsOBBPredictor for CardsOBB heads.
+
+        If the model head is a `CardsOBB` instance and no explicit predictor is provided, the `CardsOBBPredictor` is
+        used so the multi-label output is decoded correctly. Otherwise the parent behavior is preserved.
+
+        Args:
+            source: Image source (path, URL, PIL image, numpy array, etc.). Defaults to a sample asset.
+            stream (bool): If True, yield results as a generator.
+            predictor (BasePredictor, optional): Custom predictor. If None, auto-selected based on the model head.
+            **kwargs (Any): Additional prediction arguments (conf, iou, classes, etc.).
+
+        Returns:
+            (list | generator): List of `Results` or generator if `stream=True`.
+        """
+        from ultralytics.nn.modules.head import CardsOBB
+
+        if predictor is None:
+            try:
+                head = self.model.model[-1]
+            except AttributeError:
+                head = None
+            if isinstance(head, CardsOBB):
+                predictor = yolo.obb.CardsOBBPredictor
+        return super().predict(source=source, stream=stream, predictor=predictor, **kwargs)
+
+    @property
+    def task_map(self) -> dict[str, dict[str, Any]]:
+        """Map tasks to model, trainer, validator, and predictor classes.
+
+        For the "obb" task the Cards-specific trainer/validator/predictor are used so that training, validation, and
+        prediction all honor the multi-label (suit + rank) head. The model class stays `OBBModel` (which selects
+        `CardsOBBLoss` internally when the head is `CardsOBB`).
+        """
+        return {
+            "classify": {
+                "model": ClassificationModel,
+                "trainer": yolo.classify.ClassificationTrainer,
+                "validator": yolo.classify.ClassificationValidator,
+                "predictor": yolo.classify.ClassificationPredictor,
+            },
+            "detect": {
+                "model": DetectionModel,
+                "trainer": yolo.detect.DetectionTrainer,
+                "validator": yolo.detect.DetectionValidator,
+                "predictor": yolo.detect.DetectionPredictor,
+            },
+            "segment": {
+                "model": SegmentationModel,
+                "trainer": yolo.segment.SegmentationTrainer,
+                "validator": yolo.segment.SegmentationValidator,
+                "predictor": yolo.segment.SegmentationPredictor,
+            },
+            "pose": {
+                "model": PoseModel,
+                "trainer": yolo.pose.PoseTrainer,
+                "validator": yolo.pose.PoseValidator,
+                "predictor": yolo.pose.PosePredictor,
+            },
+            "obb": {
+                "model": OBBModel,
+                "trainer": yolo.obb.CardsOBBTrainer,
+                "validator": yolo.obb.CardsOBBValidator,
+                "predictor": yolo.obb.CardsOBBPredictor,
+            },
+            "semantic": {
+                "model": SemanticSegmentationModel,
+                "trainer": yolo.semantic.SemanticSegmentationTrainer,
+                "validator": yolo.semantic.SemanticSegmentationValidator,
+                "predictor": yolo.semantic.SemanticSegmentationPredictor,
+            },
+        }
+
+
 class YOLOWorld(Model):
     """YOLO-World object detection model.
 

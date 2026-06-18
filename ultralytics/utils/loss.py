@@ -1238,7 +1238,10 @@ class CardsOBBLoss(v8OBBLoss):
             mask_gt,
         )
 
-        target_scores_sum = max(target_scores.sum(), 1)
+        # Each positive anchor has 2 active target channels (suit + rank), so target_scores.sum() == 2 * num_pos.
+        # Divide by 2 to restore standard per-positive normalization (matches v8OBBLoss where sum == num_pos),
+        # otherwise all 4 losses (box, cls, dfl, angle) are halved vs the standard trainer.
+        target_scores_sum = max(target_scores.sum() / 2, 1)
 
         # Cls loss: BCE on all 17 channels (same as v8OBBLoss).
         # target_scores holds 1.0 on the suit channel AND the rank channel for positives,
