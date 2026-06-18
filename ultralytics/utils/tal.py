@@ -405,10 +405,18 @@ class CardsRotatedTaskAlignedAssigner(RotatedTaskAlignedAssigner):
     """
 
     def get_box_metrics(self, pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_gt):
-        """Compute alignment metric using joint probability P(suit) * P(rank)."""
+        """Compute alignment metric using independent suit and rank scores (average).
+
+        Uses (P(suit) + P(rank)) / 2 instead of P(suit) * P(rank) so that anchors which have learned
+        one label but not yet the other still receive a positive assignment. With the product, an
+        anchor with suit=0.9 and rank=0.1 gets joint=0.09 and is treated as background, preventing
+        the loss from reinforcing the correct suit channel. With the average, that same anchor gets
+        0.5 and remains a positive candidate, allowing the rank channel to learn while keeping the
+        suit channel engaged. The scale [0,1] matches the standard single-label TaskAlignedAssigner.
+        """
         na = pd_bboxes.shape[-2]
         mask_gt = mask_gt.bool()  # b, max_num_obj, h*w
-        overlaps = torch.zeros([self.bs, self.n_max_boxes, na], dtype=pd_bboxes.dtype, device=pd_bboxes.device)
+        overlaps = torch.zeros([self.bs, self.n_max_boxes, na], dtype=pd_bboxes.dtype, device=pd_scores.device)
         bbox_scores = torch.zeros([self.bs, self.n_max_boxes, na], dtype=pd_scores.dtype, device=pd_scores.device)
 
         ind0 = torch.arange(end=self.bs, device=pd_scores.device).view(-1, 1).expand(-1, self.n_max_boxes)  # b, max_num_obj
@@ -420,16 +428,14 @@ class CardsRotatedTaskAlignedAssigner(RotatedTaskAlignedAssigner):
         rank_labels_safe = rank_labels.clamp(0, 12) + 4
 
         # pd_scores has 17 channels. 0-3 suit, 4-16 rank.
-        # Calculate joint probability: P(suit) * P(rank)
-        # We need to extract the scores for each anchor. pd_scores shape: (bs, na, 17)
-        # To align with (bs, max_num_obj, na), we expand pd_scores to (bs, max_num_obj, na, 17)
+        # Extract the suit and rank scores for each anchor per ground truth object.
         pd_scores_expanded = pd_scores.unsqueeze(1).expand(-1, self.n_max_boxes, -1, -1)
-        
-        # Now gather the suit and rank scores for each ground truth object
+
         suit_bbox_scores = pd_scores_expanded.gather(-1, suit_labels_safe.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, na, 1)).squeeze(-1)
         rank_bbox_scores = pd_scores_expanded.gather(-1, rank_labels_safe.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, na, 1)).squeeze(-1)
-        
-        bbox_scores[mask_gt] = (suit_bbox_scores * rank_bbox_scores)[mask_gt]
+
+        # Independent average: allows partial credit when only one label is correct.
+        bbox_scores[mask_gt] = ((suit_bbox_scores + rank_bbox_scores) / 2)[mask_gt]
 
         # (b, max_num_obj, 1, 5), (b, 1, h*w, 5)
         pd_boxes = pd_bboxes.unsqueeze(1).expand(-1, self.n_max_boxes, -1, -1)[mask_gt]
