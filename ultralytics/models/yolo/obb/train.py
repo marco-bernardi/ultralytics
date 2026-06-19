@@ -84,6 +84,35 @@ import torch
 class CardsOBBValidator(OBBValidator):
     """Custom validator to duplicate GT boxes for independent suit and rank mAP evaluation."""
 
+    def build_dataset(self, img_path: str, mode: str = "val", batch: int | None = None) -> torch.utils.data.Dataset:
+        """Build a CardsYOLODataset for validation (4-point OBB polygons, dual cls labels).
+
+        The standard OBBValidator uses build_yolo_dataset -> YOLODataset, which calls
+        resample_segments expecting 100-point polygons; Cards labels are 4-point OBB polygons
+        and would raise a broadcast error. CardsYOLODataset bypasses the resampling via
+        update_labels_info, matching what the trainer does.
+        """
+        from ultralytics.data import CardsYOLODataset
+        from ultralytics.utils import colorstr
+
+        return CardsYOLODataset(
+            img_path=img_path,
+            imgsz=self.args.imgsz,
+            batch_size=batch,
+            augment=False,
+            hyp=self.args,
+            rect=self.args.rect or mode == "val",
+            cache=self.args.cache or mode == "val" if self.args.cache else None,
+            single_cls=self.args.single_cls or False,
+            stride=int(self.stride.max()) if hasattr(self, "stride") else 32,
+            pad=0.5,
+            prefix=colorstr(f"{mode}: "),
+            task=self.args.task,
+            classes=self.args.classes,
+            data=self.data,
+            fraction=1.0,
+        )
+
     def postprocess(self, preds: torch.Tensor) -> list[dict[str, torch.Tensor]]:
         """Postprocess multi-label OBB predictions with suit/rank split NMS.
 
