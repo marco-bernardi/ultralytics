@@ -423,9 +423,10 @@ class CardsRotatedTaskAlignedAssigner(RotatedTaskAlignedAssigner):
         suit_labels = gt_labels[..., 0].long()  # b, max_num_obj
         rank_labels = gt_labels[..., 1].long()  # b, max_num_obj
 
-        # Safe clamping for background boxes to prevent CUDA out-of-bounds error
+        # Safe clamping for background boxes to prevent CUDA out-of-bounds error.
+        # Labels store rank as global id 4-16 (aligned with the 17-channel names), NOT 0-12 local.
         suit_labels_safe = suit_labels.clamp(0, 3)
-        rank_labels_safe = rank_labels.clamp(0, 12) + 4
+        rank_labels_safe = rank_labels.clamp(4, 16)
 
         # pd_scores has 17 channels. 0-3 suit, 4-16 rank.
         # Extract the suit and rank scores for each anchor per ground truth object.
@@ -465,10 +466,10 @@ class CardsRotatedTaskAlignedAssigner(RotatedTaskAlignedAssigner):
         )  # (b, h*w, 17)
 
         suit_targets = target_labels[..., 0].long().clamp_(0, 3)
-        rank_targets = target_labels[..., 1].long().clamp_(0, 12)
+        rank_targets = target_labels[..., 1].long().clamp_(4, 16)
 
         target_scores.scatter_(2, suit_targets.unsqueeze(-1), 1.0)
-        target_scores.scatter_(2, (rank_targets + 4).unsqueeze(-1), 1.0)
+        target_scores.scatter_(2, rank_targets.unsqueeze(-1), 1.0)
 
         fg_scores_mask = fg_mask[:, :, None].repeat(1, 1, self.num_classes)
         target_scores = torch.where(fg_scores_mask > 0, target_scores, 0.0)
