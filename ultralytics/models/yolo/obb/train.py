@@ -84,23 +84,16 @@ import torch
 class CardsOBBValidator(OBBValidator):
     """Custom validator to duplicate GT boxes for independent suit and rank mAP evaluation."""
 
-    def init_metrics(self, model: torch.nn.Module) -> None:
-        """Initialize metrics and disable end2end for multi-label validation.
+    def __init__(self, dataloader=None, save_dir=None, args=None, _callbacks: dict | None = None) -> None:
+        """Initialize CardsOBBValidator and force end2end=False to keep raw 17-channel output.
 
-        The end2end head postprocess picks a single class per anchor (via get_topk_index),
-        which is wrong for multi-label (suit + rank). Disabling it here makes the model return
-        raw (bs, 22, N) predictions so our postprocess can split suit/rank and emit 2 detections.
+        The base validator __call__ does: if self.args.end2end is not None: model.end2end = self.args.end2end,
+        then AutoBackend(fuse=True) which removes the one2many head when end2end=True. By forcing end2end=False
+        here (before __call__ runs), the head keeps both one2many and one2one heads, and forward() returns raw
+        BCN (bs, 22, N) predictions with 17 sigmoid class scores that our postprocess can split into suit/rank.
         """
-        from ultralytics.nn.modules.head import CardsOBB
-
-        # Walk all submodules to find the CardsOBB head and disable end2end, regardless of
-        # whether model is an AutoBackend, OBBModel, or compiled wrapper.
-        for m in model.modules():
-            if isinstance(m, CardsOBB):
-                m.end2end = False
-                break
-        super().init_metrics(model)
-        self.end2end = False  # also tell the validator we are not end2end
+        super().__init__(dataloader, save_dir, args, _callbacks)
+        self.args.end2end = False  # prevent head fusion that would drop the 17-channel raw output
 
     def build_dataset(self, img_path: str, mode: str = "val", batch: int | None = None) -> torch.utils.data.Dataset:
         """Build a CardsYOLODataset for validation (4-point OBB polygons, dual cls labels).
