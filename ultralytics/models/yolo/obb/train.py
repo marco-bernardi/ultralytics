@@ -91,11 +91,14 @@ class CardsOBBValidator(OBBValidator):
         which is wrong for multi-label (suit + rank). Disabling it here makes the model return
         raw (bs, 22, N) predictions so our postprocess can split suit/rank and emit 2 detections.
         """
-        # Disable end2end on the actual model head so forward() returns raw BCN preds
-        try:
-            model.model[-1].end2end = False
-        except (AttributeError, IndexError):
-            pass
+        from ultralytics.nn.modules.head import CardsOBB
+
+        # Walk all submodules to find the CardsOBB head and disable end2end, regardless of
+        # whether model is an AutoBackend, OBBModel, or compiled wrapper.
+        for m in model.modules():
+            if isinstance(m, CardsOBB):
+                m.end2end = False
+                break
         super().init_metrics(model)
         self.end2end = False  # also tell the validator we are not end2end
 
