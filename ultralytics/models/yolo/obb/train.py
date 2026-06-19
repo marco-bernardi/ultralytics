@@ -84,6 +84,21 @@ import torch
 class CardsOBBValidator(OBBValidator):
     """Custom validator to duplicate GT boxes for independent suit and rank mAP evaluation."""
 
+    def init_metrics(self, model: torch.nn.Module) -> None:
+        """Initialize metrics and disable end2end for multi-label validation.
+
+        The end2end head postprocess picks a single class per anchor (via get_topk_index),
+        which is wrong for multi-label (suit + rank). Disabling it here makes the model return
+        raw (bs, 22, N) predictions so our postprocess can split suit/rank and emit 2 detections.
+        """
+        # Disable end2end on the actual model head so forward() returns raw BCN preds
+        try:
+            model.model[-1].end2end = False
+        except (AttributeError, IndexError):
+            pass
+        super().init_metrics(model)
+        self.end2end = False  # also tell the validator we are not end2end
+
     def build_dataset(self, img_path: str, mode: str = "val", batch: int | None = None) -> torch.utils.data.Dataset:
         """Build a CardsYOLODataset for validation (4-point OBB polygons, dual cls labels).
 
