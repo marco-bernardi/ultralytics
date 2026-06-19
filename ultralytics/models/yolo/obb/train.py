@@ -211,8 +211,8 @@ class CardsOBBValidator(OBBValidator):
         
         # If there are boxes and they are in the 2-column format
         if cls_original.shape[0] > 0 and cls_original.shape[1] == 2:
-            suit_cls = cls_original[:, 0]  # Suit ID (0-3)
-            rank_cls = cls_original[:, 1] + 4  # Rank ID (4-16)
+            suit_cls = cls_original[:, 0].clamp(0, 3)  # Suit ID (0-3)
+            rank_cls = cls_original[:, 1].clamp(0, 12) + 4  # Rank ID (4-16)
             
             # Create a 1D tensor [suit1, rank1, suit2, rank2, ...]
             new_cls = torch.stack([suit_cls, rank_cls], dim=1).flatten().float()
