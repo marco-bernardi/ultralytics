@@ -95,6 +95,7 @@ class CardsOBBValidator(OBBValidator):
         from ultralytics.data import CardsYOLODataset
         from ultralytics.utils import colorstr
 
+        stride = int(self.stride.max()) if hasattr(self.stride, "max") else int(self.stride or 32)
         return CardsYOLODataset(
             img_path=img_path,
             imgsz=self.args.imgsz,
@@ -104,7 +105,7 @@ class CardsOBBValidator(OBBValidator):
             rect=self.args.rect or mode == "val",
             cache=self.args.cache or mode == "val" if self.args.cache else None,
             single_cls=self.args.single_cls or False,
-            stride=int(self.stride.max()) if hasattr(self, "stride") else 32,
+            stride=stride,
             pad=0.5,
             prefix=colorstr(f"{mode}: "),
             task=self.args.task,
