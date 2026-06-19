@@ -83,6 +83,82 @@ import torch
 
 class CardsOBBValidator(OBBValidator):
     """Custom validator to duplicate GT boxes for independent suit and rank mAP evaluation."""
+
+    def postprocess(self, preds: torch.Tensor) -> list[dict[str, torch.Tensor]]:
+        """Postprocess multi-label OBB predictions with suit/rank split NMS.
+
+        Overrides the standard OBBValidator postprocess (which uses non_max_suppression with
+        multi_label=True on all 17 BCE channels) because that produces ~10-15 detections per
+        anchor (many channels above the low val conf threshold), flooding the evaluation with
+        false positives and capping precision/mAP. Instead, this takes the argmax of the suit
+        group (0-3) and rank group (4-16) separately, emits at most 2 detections per anchor
+        (one suit, one rank), and runs rotated NMS per class.
+
+        Returns:
+            (list[dict]): One dict per image with keys 'bboxes' (N,5 xywhr), 'conf' (N,),
+                'cls' (N,) where cls is a single id in 0-16 (suit or rank).
+        """
+        from ultralytics.utils.metrics import batch_probiou
+        from ultralytics.utils.nms import TorchNMS
+
+        pred = preds[0] if isinstance(preds, (list, tuple)) else preds
+        # Normalize to BNC. CardsOBB raw: BCN (bs,22,N); end2end: BNC (bs,max_det,23).
+        if pred.shape[1] in (22, 23):
+            pred = pred.transpose(-1, -2)
+        box = pred[..., :4]  # xywh
+        cls = pred[..., 4:21]  # 17 sigmoid scores
+        angle = pred[..., -1:]  # angle
+
+        suit_conf, suit_id = cls[..., 0:4].max(-1)
+        rank_conf, rank_id = cls[..., 4:17].max(-1)
+
+        conf_thres = self.args.conf
+        iou_thres = self.args.iou
+        max_det = self.args.max_det
+        max_wh = 7680
+
+        bs = pred.shape[0]
+        outputs = []
+        for i in range(bs):
+            # Keep anchors where either suit or rank exceeds threshold (independent filtering).
+            s_keep = suit_conf[i] > conf_thres
+            r_keep = rank_conf[i] > conf_thres
+            if not (s_keep.any() or r_keep.any()):
+                outputs.append({"bboxes": pred.new_zeros((0, 5)), "conf": pred.new_zeros((0,)), "cls": pred.new_zeros((0,))})
+                continue
+
+            # Suit detections
+            box_s = box[i][s_keep]
+            angle_s = angle[i][s_keep]
+            conf_s = suit_conf[i][s_keep]
+            cls_s = suit_id[i][s_keep]
+
+            # Rank detections
+            box_r = box[i][r_keep]
+            angle_r = angle[i][r_keep]
+            conf_r = rank_conf[i][r_keep]
+            cls_r = rank_id[i][r_keep] + 4
+
+            # Concat suit + rank rows
+            boxes2 = torch.cat([box_s, box_r], 0)
+            angle2 = torch.cat([angle_s, angle_r], 0)
+            conf2 = torch.cat([conf_s, conf_r], 0)
+            cls2 = torch.cat([cls_s, cls_r], 0)
+
+            if boxes2.shape[0] == 0:
+                outputs.append({"bboxes": pred.new_zeros((0, 5)), "conf": pred.new_zeros((0,)), "cls": pred.new_zeros((0,))})
+                continue
+
+            # Rotated NMS per class (offset xy by cls*max_wh so different classes don't suppress).
+            c = cls2 * max_wh
+            boxes_nms = torch.cat([boxes2[:, :2] + c[:, None], boxes2[:, 2:4], angle2], dim=-1)
+            idx = TorchNMS.fast_nms(boxes_nms, conf2, iou_thres, iou_func=batch_probiou)[:max_det]
+
+            bboxes = torch.cat([boxes2[idx], angle2[idx]], dim=-1)  # (n, 5) xywhr
+            outputs.append({"bboxes": bboxes, "conf": conf2[idx], "cls": cls2[idx].float()})
+
+        return outputs
+
     def _prepare_batch(self, si: int, batch: dict):
         """Prepare batch data for OBB validation by duplicating GT boxes for suit and rank."""
         # First call super to handle standard formatting and SCALING of bboxes!
