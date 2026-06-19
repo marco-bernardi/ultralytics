@@ -87,13 +87,41 @@ class CardsOBBValidator(OBBValidator):
     def __init__(self, dataloader=None, save_dir=None, args=None, _callbacks: dict | None = None) -> None:
         """Initialize CardsOBBValidator and force end2end=False to keep raw 17-channel output.
 
-        The base validator __call__ does: if self.args.end2end is not None: model.end2end = self.args.end2end,
-        then AutoBackend(fuse=True) which removes the one2many head when end2end=True. By forcing end2end=False
-        here (before __call__ runs), the head keeps both one2many and one2one heads, and forward() returns raw
-        BCN (bs, 22, N) predictions with 17 sigmoid class scores that our postprocess can split into suit/rank.
+        For standalone validation (model.val()), self.args.end2end=False is read by the base __call__
+        before AutoBackend fuse, preventing the head fusion that would drop the 17-channel raw output.
+        For in-training validation, __call__ is overridden below to disable end2end on the EMA model
+        and recreate the criterion (CardsOBBLoss instead of E2ELoss) for the duration of validation.
         """
         super().__init__(dataloader, save_dir, args, _callbacks)
         self.args.end2end = False  # prevent head fusion that would drop the 17-channel raw output
+
+    def __call__(self, trainer=None, model=None):
+        """Run validation, temporarily disabling end2end for multi-label suit/rank split.
+
+        During training, the EMA model has end2end=True and criterion=E2ELoss. If left as-is, the
+        eval-mode forward produces (bs, max_det, 7) with a single class per anchor — the 17-channel
+        split is impossible. This wrapper saves the original end2end/criterion, disables end2end and
+        recreates the criterion as CardsOBBLoss, runs the base validation, then restores everything.
+        """
+        saved = {}
+        if self.training and trainer is not None:
+            m = trainer.ema.ema or trainer.model
+            for module in m.modules():
+                if hasattr(module, "end2end"):
+                    saved["head"] = module
+                    saved["end2end"] = module.end2end
+                    module.end2end = False
+                    break
+            if hasattr(m, "criterion") and m.criterion is not None:
+                saved["criterion"] = m.criterion
+                m.criterion = m.init_criterion()
+        try:
+            return super().__call__(trainer, model)
+        finally:
+            if "head" in saved:
+                saved["head"].end2end = saved["end2end"]
+            if "criterion" in saved:
+                m.criterion = saved["criterion"]
 
     def build_dataset(self, img_path: str, mode: str = "val", batch: int | None = None) -> torch.utils.data.Dataset:
         """Build a CardsYOLODataset for validation (4-point OBB polygons, dual cls labels).
