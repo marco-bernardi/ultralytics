@@ -85,6 +85,18 @@ class CardsOBBPredictor(OBBPredictor):
         >>> results = model.predict("image.jpg", conf=0.25)
     """
 
+    def __init__(self, cfg=DEFAULT_CFG, overrides=None, _callbacks: dict | None = None):
+        """Initialize CardsOBBPredictor and force end2end=False to keep raw 17-channel output.
+
+        The model checkpoint was trained with end2end=True. If end2end stays True, setup_model -> AutoBackend(fuse=True)
+        removes the one2many head and forward() returns (bs, max_det, 7) with a single class already picked by
+        get_topk_index — which drops the second label and makes the 17-channel split in postprocess impossible. By
+        forcing end2end=False here, the head keeps both one2many/one2one heads and forward() returns raw BCN
+        (bs, 22, N) with 17 sigmoid class scores that our postprocess can split into suit/rank.
+        """
+        super().__init__(cfg, overrides, _callbacks)
+        self.args.end2end = False  # prevent head fusion; keep raw 22-channel output for multi-label split
+
     def postprocess(self, preds, img, orig_imgs, **kwargs):
         """Post-process multi-label OBB predictions into a list of Results with duplicated suit/rank detections.
 
