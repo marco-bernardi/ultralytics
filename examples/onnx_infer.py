@@ -38,49 +38,52 @@ def sigmoid(x):
     return 1.0 / (1.0 + np.exp(-x))
 
 
-def batch_probiou(obb1, obb2, eps=1e-7):
-    """Calculate IoU between rotated boxes (xywhr) using probabilistic IoU.
+def _get_covariance_matrix(boxes):
+    """Generate covariance matrix from OBB (xywhr). Returns (a, b, c) each (N,)."""
+    w2h2 = boxes[:, 2:4] ** 2 / 12.0  # (N, 2)
+    a = w2h2[:, 0]
+    b = w2h2[:, 1]
+    t = boxes[:, 4]
+    cos = np.cos(t)
+    sin = np.sin(t)
+    cos2 = cos ** 2
+    sin2 = sin ** 2
+    return a * cos2 + b * sin2, a * sin2 + b * cos2, (a - b) * cos * sin
 
-    Args:
-        obb1: (N, 5) xywhr
-        obb2: (M, 5) xywhr
-    Returns:
-        (N, M) IoU matrix
-    """
-    x1, y1, w1, h1, t1 = np.split(obb1, 5, axis=-1)
-    x2, y2, w2, h2, t2 = np.split(obb2, 5, axis=-1)
-    t1 = t1 % np.pi
-    t2 = t2 % np.pi
-    # Convert to covariance
-    a1 = (w1 / 2) ** 2 + eps
-    b1 = (h1 / 2) ** 2 + eps
-    c1 = np.cos(t1)
-    s1 = np.sin(t1)
-    a2 = (w2 / 2) ** 2 + eps
-    b2 = (h2 / 2) ** 2 + eps
-    c2 = np.cos(t2)
-    s2 = np.sin(t2)
-    # Bhattacharyya distance
-    dx = x1 - x2.T
-    dy = y1 - y2.T
-    t1_cos2 = c1 ** 2
-    t1_sin2 = s1 ** 2
-    t2_cos2 = c2.T ** 2
-    t2_sin2 = s2.T ** 2
-    # Simplified probiou (Gaussian Wasserstein distance approximation)
-    w_dist = (t1_cos2 * a1 + t1_sin2 * b1 + t2_cos2 * a2 + t2_sin2 * b2) * eps
-    h_dist = (t1_sin2 * a1 + t1_cos2 * b1 + t2_sin2 * a2 + t2_cos2 * b2) * eps
-    # Diagonal elements
-    d1 = (a1 * t1_cos2 + b1 * t1_sin2 + a2.T * t2_cos2 + b2.T * t2_sin2) * eps
-    d2 = (a1 * t1_sin2 + b1 * t1_cos2 + a2.T * t2_sin2 + b2.T * t2_cos2) * eps
-    # Off-diagonal
-    cross = ((a1 - b1) * c1 * s1 + (a2 - b2).T * c2 * s2) * eps
-    # Wasserstein distance
-    bd2 = (dx ** 2) / (d1 + eps) + (dy ** 2) / (d2 + eps)
-    hd = (w_dist + h_dist + 2 * np.abs(cross)) / (np.sqrt(d1 * d2) + eps)
-    bd2 = bd2 + 0.5 * hd
-    iou = np.exp(-bd2.clip(min=0))
-    return iou.squeeze() if iou.size > 1 else iou
+
+def batch_probiou(obb1, obb2, eps=1e-7):
+    """Calculate probabilistic IoU between OBBs. obb1: (N,5), obb2: (M,5) -> (N, M)."""
+    x1, y1 = obb1[:, 0], obb1[:, 1]  # (N,)
+    x2, y2 = obb2[:, 0], obb2[:, 1]  # (M,)
+    a1, b1, c1 = _get_covariance_matrix(obb1)  # (N,)
+    a2, b2, c2 = _get_covariance_matrix(obb2)  # (M,)
+
+    # Broadcasting: (N, 1) vs (1, M) -> (N, M)
+    a1 = a1[:, None]
+    b1 = b1[:, None]
+    c1 = c1[:, None]
+    a2 = a2[None, :]
+    b2 = b2[None, :]
+    c2 = c2[None, :]
+    x1 = x1[:, None]
+    y1 = y1[:, None]
+    x2 = x2[None, :]
+    y2 = y2[None, :]
+
+    t1 = (
+        ((a1 + a2) * (y1 - y2) ** 2 + (b1 + b2) * (x1 - x2) ** 2)
+        / ((a1 + a2) * (b1 + b2) - (c1 + c2) ** 2 + eps)
+    ) * 0.25
+    t2 = (((c1 + c2) * (x2 - x1) * (y1 - y2)) / ((a1 + a2) * (b1 + b2) - (c1 + c2) ** 2 + eps)) * 0.5
+    t3 = (
+        ((a1 + a2) * (b1 + b2) - (c1 + c2) ** 2)
+        / (4 * np.sqrt(np.clip(a1 * b1 - c1 ** 2, 0, None) * np.clip(a2 * b2 - c2 ** 2, 0, None)) + eps)
+        + eps
+    )
+    t3 = 0.5 * np.log(t3)
+    bd = np.clip(t1 + t2 + t3, eps, 100.0)
+    hd = np.sqrt(1.0 - np.exp(-bd) + eps)
+    return 1 - hd  # (N, M)
 
 
 def rotated_nms(boxes_xywhr, scores, iou_thres=0.45):
@@ -95,8 +98,8 @@ def rotated_nms(boxes_xywhr, scores, iou_thres=0.45):
         if len(order) == 1:
             break
         rest = order[1:]
-        iou = batch_probiou(boxes_xywhr[i:i+1], boxes_xywhr[rest])
-        iou = np.asarray(iou).flatten()
+        # IoU between single box i and all rest: (1, len(rest)) -> flatten
+        iou = batch_probiou(boxes_xywhr[i:i+1], boxes_xywhr[rest]).flatten()
         order = rest[iou < iou_thres]
     return np.array(keep, dtype=int)
 
