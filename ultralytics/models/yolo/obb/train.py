@@ -180,6 +180,7 @@ class CardsOBBValidator(OBBValidator):
 
         suit_conf, suit_id = cls[..., 0:4].max(-1)
         rank_conf, rank_id = cls[..., 4:17].max(-1)
+        joint_conf = suit_conf * rank_conf  # Use joint confidence!
 
         conf_thres = self.args.conf
         iou_thres = self.args.iou
@@ -189,42 +190,41 @@ class CardsOBBValidator(OBBValidator):
         bs = pred.shape[0]
         outputs = []
         for i in range(bs):
-            # Keep anchors where either suit or rank exceeds threshold (independent filtering).
-            s_keep = suit_conf[i] > conf_thres
-            r_keep = rank_conf[i] > conf_thres
-            if not (s_keep.any() or r_keep.any()):
+            # Keep anchors based on joint confidence
+            keep = joint_conf[i] > conf_thres
+            if not keep.any():
                 outputs.append({"bboxes": pred.new_zeros((0, 5)), "conf": pred.new_zeros((0,)), "cls": pred.new_zeros((0,))})
                 continue
 
-            # Suit detections
-            box_s = box[i][s_keep]
-            angle_s = angle[i][s_keep]
-            conf_s = suit_conf[i][s_keep]
-            cls_s = suit_id[i][s_keep]
+            b = box[i][keep]
+            a = angle[i][keep]
+            sc = joint_conf[i][keep]
+            sid = suit_id[i][keep]
+            rid = rank_id[i][keep]
 
-            # Rank detections
-            box_r = box[i][r_keep]
-            angle_r = angle[i][r_keep]
-            conf_r = rank_conf[i][r_keep]
-            cls_r = rank_id[i][r_keep] + 4
+            # Create a combined class ID (0-51) for card-level NMS
+            card_id = sid * 13 + rid
+            
+            # Rotated NMS at the CARD level
+            c = card_id * max_wh
+            boxes_nms = torch.cat([b[:, :2] + c[:, None], b[:, 2:4], a], dim=-1)
+            idx = TorchNMS.fast_nms(boxes_nms, sc, iou_thres, iou_func=batch_probiou)[:max_det]
 
-            # Concat suit + rank rows
-            boxes2 = torch.cat([box_s, box_r], 0)
-            angle2 = torch.cat([angle_s, angle_r], 0)
-            conf2 = torch.cat([conf_s, conf_r], 0)
-            cls2 = torch.cat([cls_s, cls_r], 0)
+            # Keep only surviving anchors
+            b_surv = b[idx]
+            a_surv = a[idx]
+            sc_surv = sc[idx]
+            sid_surv = sid[idx]
+            rid_surv = rid[idx]
 
-            if boxes2.shape[0] == 0:
-                outputs.append({"bboxes": pred.new_zeros((0, 5)), "conf": pred.new_zeros((0,)), "cls": pred.new_zeros((0,))})
-                continue
+            # Duplicate each surviving anchor into two rows: suit (cls=sid) then rank (cls=rid+4)
+            boxes2 = b_surv.repeat_interleave(2, dim=0)
+            angle2 = a_surv.repeat_interleave(2, dim=0)
+            conf2 = sc_surv.repeat_interleave(2)
+            cls2 = torch.stack([sid_surv, rid_surv + 4], dim=1).flatten()
 
-            # Rotated NMS per class (offset xy by cls*max_wh so different classes don't suppress).
-            c = cls2 * max_wh
-            boxes_nms = torch.cat([boxes2[:, :2] + c[:, None], boxes2[:, 2:4], angle2], dim=-1)
-            idx = TorchNMS.fast_nms(boxes_nms, conf2, iou_thres, iou_func=batch_probiou)[:max_det]
-
-            bboxes = torch.cat([boxes2[idx], angle2[idx]], dim=-1)  # (n, 5) xywhr
-            outputs.append({"bboxes": bboxes, "conf": conf2[idx], "cls": cls2[idx].float()})
+            bboxes = torch.cat([boxes2, angle2], dim=-1)  # (n, 5) xywhr
+            outputs.append({"bboxes": bboxes, "conf": conf2, "cls": cls2.float()})
 
         return outputs
 

@@ -113,7 +113,7 @@ def postprocess(preds, conf_thres=0.25, iou_thres=0.45, max_det=300, max_wh=7680
     # preds: (1, 22, N) BCN -> transpose to (1, N, 22) BNC
     pred = preds[0].T  # (N, 22)
     box = pred[:, :4]  # xywh
-    cls = sigmoid(pred[:, 4:21])  # 17 sigmoid scores
+    cls = pred[:, 4:21]  # 17 class scores (sigmoid already applied inside the ONNX model)
     angle = pred[:, 21:22]  # angle
 
     # Best suit and rank per anchor
@@ -166,7 +166,8 @@ def postprocess(preds, conf_thres=0.25, iou_thres=0.45, max_det=300, max_wh=7680
 
 def scale_boxes(boxes, img_shape, orig_shape, ratio_pad):
     """Scale boxes from model input to original image."""
-    r, (pad_w, pad_h) = ratio_pad
+    (r, r), (pad_w, pad_h) = ratio_pad  # ratio is (r, r) uniform, pad is (left, top)
+    r = r[0] if isinstance(r, (tuple, list, np.ndarray)) else r
     boxes[:, 0] = (boxes[:, 0] - pad_w) / r
     boxes[:, 1] = (boxes[:, 1] - pad_h) / r
     boxes[:, 2] = boxes[:, 2] / r

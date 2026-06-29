@@ -153,26 +153,37 @@ class CardsOBBPredictor(OBBPredictor):
             sid = suit_id[i][keep]  # (K,)
             rid = rank_id[i][keep]  # (K,)
 
-            # Duplicate each anchor into two rows: suit (cls=sid) then rank (cls=rid+4).
-            boxes2 = b.repeat_interleave(2, dim=0)  # (2K, 4)
-            angle2 = a.repeat_interleave(2, dim=0)  # (2K, 1)
-            conf2 = sc.repeat_interleave(2)  # (2K,)
-            cls2 = torch.stack([sid, rid + 4], dim=1).flatten()  # (2K,)
+            # Create a combined class ID (0-51) for card-level NMS
+            card_id = sid * 13 + rid
+            
+            # Rotated NMS at the CARD level
+            c = card_id * (0 if agnostic else max_wh)
+            boxes_nms = torch.cat([b[:, :2] + c[:, None], b[:, 2:4], a], dim=-1)  # xywhr
+            idx = TorchNMS.fast_nms(boxes_nms, sc, iou_thres, iou_func=batch_probiou)[:max_det]
+
+            # Keep only surviving anchors
+            b_surv = b[idx]
+            a_surv = a[idx]
+            sc_surv = sc[idx]
+            sid_surv = sid[idx]
+            rid_surv = rid[idx]
+
+            # Duplicate each surviving anchor into two rows: suit (cls=sid) then rank (cls=rid+4).
+            boxes2 = b_surv.repeat_interleave(2, dim=0)  # (2K, 4)
+            angle2 = a_surv.repeat_interleave(2, dim=0)  # (2K, 1)
+            conf2 = sc_surv.repeat_interleave(2)  # (2K,)
+            cls2 = torch.stack([sid_surv, rid_surv + 4], dim=1).flatten()  # (2K,)
 
             # Optional class filter (0-16 ids).
             if classes is not None:
                 filt = (cls2[:, None] == classes[None, :]).any(1)
                 boxes2, angle2, conf2, cls2 = boxes2[filt], angle2[filt], conf2[filt], cls2[filt]
+            
             if boxes2.shape[0] == 0:
                 output.append(pred.new_zeros((0, 7)))
                 continue
 
-            # Rotated NMS per class: offset xy by cls*max_wh so different classes do not suppress each other
-            # (same scheme as non_max_suppression with rotated=True, agnostic=False).
-            c = cls2 * (0 if agnostic else max_wh)
-            boxes_nms = torch.cat([boxes2[:, :2] + c[:, None], boxes2[:, 2:4], angle2], dim=-1)  # xywhr
-            idx = TorchNMS.fast_nms(boxes_nms, conf2, iou_thres, iou_func=batch_probiou)[:max_det]
-            det = torch.cat([boxes2[idx], conf2[idx, None], cls2[idx, None].float(), angle2[idx]], dim=-1)  # (n, 7)
+            det = torch.cat([boxes2, conf2[:, None], cls2[:, None].float(), angle2], dim=-1)  # (n, 7)
             output.append(det)
 
         if not isinstance(orig_imgs, list):  # torch.Tensor batch -> list of numpy HWC BGR
